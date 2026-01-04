@@ -1,164 +1,184 @@
 # HuckVPN — AGENTS.md
 
-This file instructs AI coding agents how to work in this repository.
+This repository contains two separate applications:
 
-## 1) Behavioral requirements for agents
+1. HuckVPN Client (macOS `.app`)
+2. HuckVPN Server (headless background service)
 
-### 1.1 Security-first, least privilege
+Agents must follow this document when writing code.
 
-- Never transmit or log private keys.
-- Never write secret material to stdout/stderr.
-- Treat all input as untrusted (UI text fields, config files, environment variables).
-- Avoid introducing network-facing services unless explicitly specified.
-- Prefer explicit user-driven actions over background automation.
+## 1. Agent behavior
+
+### 1.1 Security and privacy are non-negotiable
+
+- Never transmit, print, or log private keys.
+- Never log bootstrap tokens.
+- Treat all user inputs (UI fields, config files, env vars) as untrusted.
+- Minimize privileged operations; isolate them; make them explicit.
+- Prefer deterministic, auditable behavior over clever automation.
 
 ### 1.2 No assumptions
 
-- If a requirement is missing or ambiguous, do not invent behavior.
-- Instead:
-  1. implement a safe default that does not reduce security or privacy, and
-  2. record the ambiguity in `docs/OPEN_QUESTIONS.md` with a proposed decision and tradeoffs.
+- If a requirement is unclear, do not guess.
+- Implement the safest minimal behavior that does not reduce privacy/security.
+- Record the ambiguity in `docs/OPEN_QUESTIONS.md` and keep code structured so the decision can be swapped later.
 
-### 1.3 Determinism and auditability
+### 1.3 Incremental delivery only (no “big bang” implementation)
 
-- All side effects (starting VPN, changing routes, editing configs) must be:
-  - initiated by an explicit user action,
-  - logged to an internal, user-viewable log panel (redacting secrets),
-  - reversible (stop/disconnect should unwind changes).
+Agents must implement in the step order below. Each step must:
 
-### 1.4 Mac-first quality bar
+- build successfully,
+- run successfully,
+- include basic tests where applicable,
+  before moving to the next step.
 
-- Primary output is a macOS `.app`.
-- Code must follow macOS conventions (app bundle structure, Launch Services behavior).
-- All platform-specific actions must be isolated in `internal/platform/macos`.
+## 2. Languages, frameworks, and tooling
 
-## 2) Languages, frameworks, and packaging
+### 2.1 Client
 
-### 2.1 Implementation language
+- Language: Go
+- UI: Wails (Go backend + WebView frontend)
+- macOS secret storage: Keychain (required)
+- Tor: required for MVP
+- WireGuard: controlled via macOS-compatible tooling (exact mechanism implemented behind interfaces)
 
-- Use **Go** for application logic and system integration.
+### 2.2 Server
 
-### 2.2 UI framework
+- Server is headless and must run on a server OS (Linux preferred) and optionally on a local machine.
+- Implementation may be:
+  - a Go binary plus a minimal install script, OR
+  - a shell-first script that installs/runs a Go binary.
+- Server must expose an HTTPS endpoint for registration and run WireGuard.
 
-- Use **Wails (Go + WebView)** for the macOS desktop UI.
-- UI is minimal and stable: start/stop, exit node selection, add/edit/delete nodes, status.
+### 2.3 Repository layout (must follow)
 
-### 2.3 System integration
+/apps
+/apps/client
+/apps/client/cmd
+/apps/client/cmd/huckvpn-client
+/apps/client/internal
+/apps/client/ui
+/apps/client/assets
+/apps/client/build
 
-- WireGuard control must be performed via:
-  - system WireGuard tools when available (e.g., `wg`, `wg-quick`) or
-  - a dedicated implementation only if specified later.
-- Privileged actions must be isolated behind a single internal interface:
-  - `internal/platform/macos/privilege` (elevation strategy is a spec item; do not assume).
+/apps/server
+/apps/server/cmd
+/apps/server/cmd/huckvpn-server
+/apps/server/internal
+/apps/server/scripts
 
-### 2.4 Repo layout (must follow)
+/shared
+/docs
+/AGENTS.md
+/SPECIFICATIONS.md
 
-- Monorepo is allowed, but **HuckVPN is a single standalone macOS app**.
-- Required structure:
-
-  /apps/huckvpn/
-  cmd/huckvpn/ # main entrypoint
-  internal/ # Go packages (no circular deps)
-  ui/ # Wails frontend
-  assets/ # icons, templates, etc.
-  build/ # packaging scripts
-  README.md
-
-  /shared/ # optional shared libs (no secrets, no side effects)
-  /docs/ # design docs, open questions, threat model
-
-## 3) Workflow (step-by-step; do not implement everything at once)
-
-Agents must follow this incremental workflow. Each step must compile and run before moving to the next.
-
-### Step 0 — Repository bootstrap
-
-- Create folder structure.
-- Add Go module(s) for `/apps/huckvpn`.
-- Add Wails scaffold for UI.
-- Add `make dev` and `make build-macos` commands.
-
-Deliverable: app launches and shows a placeholder window.
-
-### Step 1 — Domain model + storage
-
-- Implement exit node model:
-  - ID, display name, bootstrap endpoint (host:port and scheme), isLocal flag.
-- Implement local persistence:
-  - a single config file in an OS-appropriate user directory.
-- Implement CRUD operations:
-  - add, edit, delete, list exit nodes.
-
-Deliverable: UI can add/edit/delete exit nodes and persists them.
-
-### Step 2 — WireGuard identity management
-
-- Implement client identity:
-  - generate one WireGuard keypair locally (private key never leaves device),
-  - store securely (storage mechanism must be specified; if unclear, implement file storage with restrictive permissions and document the need for Keychain).
-- Expose in UI:
-  - "Initialize" or "Reset identity" actions (reset must warn about breaking server registrations).
-
-Deliverable: identity exists and is stable across restarts.
-
-### Step 3 — Connection orchestration (no server assumptions)
-
-- Implement connection state machine:
-  - DISCONNECTED → CONNECTING → CONNECTED → DISCONNECTING → DISCONNECTED
-  - error transitions and retries are explicit.
-- Implement `Start` and `Stop` functions that call a pluggable backend.
-- Backend initially can be a stub (no real networking), but must preserve state and logs.
-
-Deliverable: UI start/stop works with correct state transitions and logging.
-
-### Step 4 — Real WireGuard bring-up (macOS)
-
-- Implement actual WireGuard activation path for macOS.
-- Ensure stop cleanly reverts changes.
-- Add status checks (tunnel up, interface present, current endpoint).
-
-Deliverable: real tunnel can be brought up given a complete config.
-
-### Step 5 — Exit node first-connect bootstrap + registration
-
-- Implement first-time connect behavior:
-  - client contacts exit node bootstrap endpoint,
-  - submits client public key and required auth material,
-  - receives server-side parameters required for WireGuard config.
-- Do not assume transport security; implement only as specified, otherwise mark as open question.
-
-Deliverable: client can register and then connect using returned parameters.
-
-### Step 6 — Tor integration
-
-- Integrate Tor as specified (always-on or optional is a spec item).
-- Implement leak protection and routing behavior only per specification.
-
-Deliverable: Tor behavior is correct and testable.
-
-### Step 7 — Packaging and distribution
-
-- Produce a signed/notarized `.app` only if specified; otherwise produce an unsigned `.app` that runs on the developer machine.
-- Provide reproducible builds: `make build-macos` outputs `dist/HuckVPN.app`.
-
-Deliverable: `.app` artifact produced from clean repo checkout.
-
-## 4) Coding standards
+### 2.4 Standards
 
 - Go:
-  - `golangci-lint` configured; no lint suppression without justification.
-  - Use context-aware functions for operations that can block.
-  - Log redaction: never log keys, tokens, full configs.
-- Frontend:
-  - Keep UI minimal; avoid large frameworks unless Wails template uses one.
-- Tests:
-  - Unit tests for parsing, persistence, state machine.
-  - Integration test harness stubs for platform calls.
+  - Use `context.Context` for all operations that may block (network calls, process exec).
+  - Use structured errors; do not hide failures.
+  - Keep platform-specific code under `internal/platform/<os>`.
+- UI:
+  - Keep minimal: Start, Stop, Exit Node selector, Add Exit Node, Status, Logs.
+- Logging:
+  - Must be user-visible (in-app log panel) and redacted.
+  - Never log secrets (private keys, tokens, full configs).
 
-## 5) Documentation obligations
+## 3. Step-by-step workflow
 
-Agents must update:
+### Step 0 — Scaffolding
 
-- `SPECIFICATIONS.md` if scope changes.
-- `docs/OPEN_QUESTIONS.md` for unresolved decisions.
-- `docs/THREAT_MODEL.md` whenever adding a new trust boundary (e.g., bootstrap API, privilege escalation, Tor routing).
+- Create repo structure.
+- Scaffold Wails client app; client launches with placeholder UI.
+- Scaffold server Go module; server builds and prints version/help.
+  Deliverable: both apps build; client window opens.
+
+### Step 1 — Shared domain model
+
+- Define shared types (non-secret):
+  - ExitNode record
+  - ConnectionState enum
+- Place in `/shared/model`.
+  Deliverable: both client and server can import shared model without cycles.
+
+### Step 2 — Client: exit node registry (local persistence)
+
+- Implement local registry:
+  - list/add/edit/delete exit nodes
+  - persist to a config file in a user directory
+- Include built-in entry: “Local Machine” (non-removable).
+  Deliverable: UI can manage exit nodes and persists across restarts.
+
+### Step 3 — Client: WireGuard identity with macOS Keychain
+
+- Implement identity lifecycle:
+  - generate one WireGuard keypair
+  - store private key in macOS Keychain (required)
+  - store public key in non-secret local storage for display/requests
+- Provide UI actions:
+  - Initialize identity
+  - Reset identity (with warnings)
+    Deliverable: identity persists; private key never appears in logs.
+
+### Step 4 — Client: Tor lifecycle (required)
+
+- Implement Tor management:
+  - start Tor when connecting
+  - confirm readiness (bootstrap completed)
+  - stop Tor on disconnect (as specified in specs)
+- No “fallback to clearnet.”
+  Deliverable: client can start/stop Tor deterministically and detect readiness.
+
+### Step 5 — Client: connection orchestrator (state machine)
+
+- Implement connection state machine with explicit transitions and errors:
+  - DISCONNECTED → CONNECTING → CONNECTED → DISCONNECTING → DISCONNECTED
+- Implement Start/Stop wiring to state machine.
+  Deliverable: UI behaves correctly even under failure.
+
+### Step 6 — Client ↔ Server: registration over HTTPS + TLS + bootstrap token
+
+- Implement:
+  - `RegisterPeer(exitNode, clientPublicKey, bootstrapToken)` over HTTPS
+  - Server validates token and registers peer
+  - Server returns parameters required for WireGuard client config
+- TLS must be enforced (no plaintext).
+  Deliverable: first-time connect performs registration and stores server response.
+
+### Step 7 — Client: WireGuard bring-up and leak protection
+
+- Use the server-returned parameters to create a runtime WireGuard configuration.
+- Bring up tunnel and apply:
+  - DNS settings (as specified)
+  - routing rules
+  - leak prevention rules
+- Ensure Stop cleans up.
+  Deliverable: connect/disconnect functions reliably.
+
+### Step 8 — Server: headless daemon + installer script
+
+- Server responsibilities:
+  - run WireGuard interface
+  - expose HTTPS registration endpoint
+  - validate bootstrap token
+  - add/remove peers (live update)
+  - firewall baseline (as specified)
+- Provide scripts:
+  - install dependencies
+  - install service
+  - start/stop/status
+    Deliverable: server can run on a VPS and accept registrations securely.
+
+### Step 9 — Packaging
+
+- Build client `.app` to `dist/HuckVPN.app` (dev/local distribution).
+- Document how signing/notarization can be added later (no implementation required for MVP unless specified).
+  Deliverable: downloadable `.app` artifact.
+
+## 4. Documentation obligations
+
+Agents must maintain:
+
+- `SPECIFICATIONS.md` (truth source of requirements)
+- `docs/OPEN_QUESTIONS.md` (unresolved decisions)
+- `docs/THREAT_MODEL.md` (trust boundaries, attack surfaces, mitigations)

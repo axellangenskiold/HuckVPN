@@ -1,248 +1,198 @@
-# HuckVPN — SPECIFICATIONS.md
+# HuckVPN – TLS Model Decision (Final)
 
-This document defines the build plan and functional specifications for HuckVPN, a standalone macOS VPN client delivered as a downloadable `.app`.
+## Decision Summary
 
-## 1) Product definition
+**HuckVPN will use self-signed TLS with certificate pinning (Option B).**
 
-### 1.1 Primary objective
+This decision is final and applies to the **client ↔ server registration channel** (HTTPS).  
+WireGuard traffic security is separate and unaffected by this choice.
 
-Deliver a macOS desktop application (`HuckVPN.app`) that allows a user to:
+---
 
-- start a VPN connection,
-- stop a VPN connection,
-- select an exit node,
-- add/edit/remove exit nodes,
-- view connection status.
+## 1. Problem Being Solved
 
-### 1.2 Non-goals (until explicitly added)
+When the HuckVPN client connects to an exit node for the **first time**, it must:
 
-- No built-in cloud controller UI (e.g., `gcloud` wrapper) unless specified.
-- No assumption that exit nodes exist at ship time.
-- No automatic server provisioning.
-- No hidden default exit nodes.
+- Send its **WireGuard public key**
+- Receive **server configuration parameters**
+- Be absolutely sure it is talking to **the intended server**, not an attacker
 
-## 2) Supported platforms
+This must hold even if:
 
-- macOS is first-class.
-- Any support for Windows/Linux is out of scope unless explicitly specified later.
+- DNS is hijacked
+- A Wi-Fi network is malicious
+- A certificate authority is compromised
 
-## 3) Architecture overview
+TLS alone is not sufficient unless **server identity verification** is clearly defined.
 
-### 3.1 Components
+---
 
-- Single application: `HuckVPN.app`
-- Internal modules:
-  - UI (Wails)
-  - Exit node registry (local persistence)
-  - Identity manager (WireGuard keypair)
-  - Connection orchestrator (state machine)
-  - Platform adapter (macOS networking + privilege)
-  - Optional: bootstrap/registration client (first-connect)
+## 2. Chosen Solution: Self-Signed TLS + Certificate Pinning
 
-### 3.2 Trust boundaries
+### Definition
 
-- Local machine (user space UI)
-- Privileged operations (network stack changes)
-- Remote exit node (bootstrap endpoint + WireGuard server)
+- Each HuckVPN server generates its **own self-signed TLS certificate**
+- The HuckVPN client **pins** the server’s certificate fingerprint (SHA-256)
+- The client **trusts only that exact certificate**
+- No public Certificate Authorities (CAs) are used or trusted
 
-Any addition across trust boundaries must be documented in `docs/THREAT_MODEL.md`.
+This is conceptually similar to how SSH host key verification works.
 
-## 4) Exit nodes
+---
 
-### 4.1 Exit node record (required fields)
+## 3. Server-Side Behavior (HuckVPN Server)
 
-Each exit node stored locally must include:
+### 3.1 TLS Certificate
 
-- `id`: stable identifier (string)
-- `displayName`: shown in UI
-- `bootstrapEndpoint`: scheme + host + port (e.g., `https://example.com:8443`)
-- `isLocal`: boolean
-- optional metadata fields may be added only if specified.
+On first setup, the server must:
 
-### 4.2 Shipping state
+- Generate a TLS private key
+- Generate a self-signed TLS certificate
+- Persist both securely on disk
+- Use this certificate for its HTTPS registration endpoint
 
-- Application ships with **no remote exit nodes**.
-- Application includes a single built-in option:
-  - "Local Machine" (`isLocal=true`)
-  - bootstrap endpoint points to localhost (exact port is an open item if not specified elsewhere).
+### 3.2 Server Secrets
 
-### 4.3 UI behavior
+The server has **three sensitive secrets**:
 
-- Exit node dropdown includes:
-  - "Local Machine"
-  - user-added exit nodes
-  - an "Add Exit Node…" affordance
-- Selecting an exit node changes the target for future connection attempts.
+1. WireGuard private key
+2. TLS private key
+3. Bootstrap token
 
-## 5) Identity and keys (WireGuard)
+None of these are ever transmitted automatically to clients.
 
-### 5.1 Client identity
+### 3.3 Registration Endpoint
 
-- The client must generate exactly one WireGuard keypair during initialization.
-- The private key must never be transmitted off-device.
-- Public key may be sent to exit nodes during registration.
+- Listens on HTTPS only
+- Presents the self-signed certificate
+- Rejects plaintext HTTP
+- Requires a valid bootstrap token for registration
 
-### 5.2 Storage
+---
 
-- Storage mechanism (Keychain vs file) must be explicitly decided.
-- If undecided, implement file storage with restrictive permissions and record the need for Keychain as an open question.
+## 4. Client-Side Behavior (HuckVPN Client)
 
-### 5.3 Reset behavior
+### 4.1 Exit Node Definition (TLS-relevant fields)
 
-- User can reset identity (if provided).
-- Resetting identity invalidates prior server registrations and must warn the user.
+Each exit node record **must include**:
 
-## 6) Connection lifecycle
+- HTTPS endpoint (IP or hostname + port)
+- TLS certificate fingerprint (SHA-256)
+- Bootstrap token
 
-### 6.1 States
+### 4.2 Connection Process
 
-- DISCONNECTED
-- CONNECTING
-- CONNECTED
-- DISCONNECTING
-- ERROR (with reason and recovery guidance)
+When the client connects to an exit node:
 
-### 6.2 Start/Stop semantics
+1. Open HTTPS connection
+2. **Disable default OS CA trust**
+3. Extract server’s TLS certificate
+4. Compute SHA-256 fingerprint
+5. Compare against pinned fingerprint
+6. If mismatch → **hard fail**
+7. If match → proceed to registration
 
-- Start:
-  - validates selected exit node,
-  - ensures identity exists,
-  - performs registration if needed (if registration is part of the current spec),
-  - brings WireGuard up,
-  - applies required routing/DNS policies,
-  - updates state and status view.
-- Stop:
-  - brings WireGuard down,
-  - restores routing/DNS to pre-connection state as much as feasible,
-  - updates state and status view.
+No registration data is sent until step 6 succeeds.
 
-## 7) First-time connect (bootstrap + registration)
+### 4.3 Failure Handling
 
-### 7.1 Problem
+If certificate verification fails:
 
-If exit nodes are user-added at runtime, the client must know where to send its public key on first connect. This is solved by the `bootstrapEndpoint` stored for that exit node.
+- Connection must abort immediately
+- User must be shown a clear error
+- No retries unless user explicitly changes the exit node configuration
 
-### 7.2 Registration data flow (conceptual)
+---
 
-- Client → bootstrap endpoint:
-  - client public key
-  - authentication material required to prevent anonymous registrations (token or other mechanism)
-- Server → client response:
-  - server public key
-  - WireGuard endpoint (host:port)
-  - allowed IPs
-  - DNS settings
-  - any additional required parameters
+## 5. Security Properties
 
-### 7.3 Security requirements
+This model guarantees:
 
-- Private keys are never transmitted.
-- Anonymous registration must be prevented.
-- Transport security requirements (TLS vs pinned cert vs SSH) must be explicitly specified; otherwise recorded as open question.
+- Immunity to DNS hijacking
+- Immunity to rogue or compromised CAs
+- Strong protection against MITM attacks
+- Explicit, user-controlled trust decisions
+- Compatibility with raw IP addresses (no domain required)
 
-## 8) Tor integration
+An attacker would need:
 
-Tor integration was part of the earlier direction (VPN-over-Tor). For HuckVPN:
+- The server’s TLS private key **or**
+- The pinned fingerprint
 
-- Tor behavior must be explicitly specified:
-  - always on vs optional,
-  - client-side only vs additional server routing,
-  - leak protection rules.
+Both are under user control.
 
-If not specified, Tor integration remains out of scope and must be recorded in `docs/OPEN_QUESTIONS.md`.
+---
 
-## 9) macOS privilege and networking
+## 6. Operational Tradeoffs (Accepted)
 
-### 9.1 Privilege boundary
+### 6.1 Manual Trust Establishment
 
-- Any operation requiring elevated privileges must be isolated in platform-specific code.
-- Elevation strategy must be specified (helper tool vs per-action prompt).
-- The app must not run the entire UI as root.
+- User must copy the TLS fingerprint once when adding an exit node
+- This is intentional and explicit
 
-### 9.2 Cleanup requirements
+### 6.2 Certificate Rotation
 
-- On stop or crash recovery, the app must attempt to restore networking state.
+- If the server regenerates its TLS certificate:
+  - The client’s pinned fingerprint must be updated
+- This is acceptable for self-hosted infrastructure
 
-## 10) Logging and observability
+---
 
-### 10.1 User-facing logs
+## 7. Comparison to Public CA TLS (Rejected)
 
-- App must provide a log view suitable for debugging.
-- Logs must redact secrets:
-  - private keys,
-  - registration tokens,
-  - full configs.
+| Aspect                  | Public CA TLS | Pinned TLS (Chosen)  |
+| ----------------------- | ------------- | -------------------- |
+| Domain required         | Yes           | No                   |
+| CA dependency           | Yes           | No                   |
+| Works with IP only      | No            | Yes                  |
+| MITM resistance         | Strong        | Stronger             |
+| Manual setup            | Minimal       | One-time fingerprint |
+| Fit for self-hosted VPN | Moderate      | Excellent            |
 
-### 10.2 Diagnostics
+Public CA TLS was rejected to avoid:
 
-- Status view should include:
-  - selected exit node,
-  - connection state,
-  - tunnel/interface status,
-  - last error (if any).
+- External trust dependencies
+- Domain and renewal requirements
+- CA-based attack surface
 
-## 11) Build and packaging
+---
 
-### 11.1 Output
+## 8. Implementation Requirements (Mandatory)
 
-- `dist/HuckVPN.app` created via `make build-macos`.
+### Client
 
-### 11.2 Signing/notarization
+- Must implement explicit certificate pinning
+- Must not trust system CAs for registration
+- Must never log certificates or fingerprints
+- Must fail closed on verification errors
 
-- Whether the app must be signed/notarized must be explicitly specified.
-- If not specified, the deliverable is an unsigned `.app` intended for local use/development.
+### Server
 
-## 12) Implementation plan (from scratch to fully developed)
+- Must generate and persist self-signed TLS cert
+- Must expose fingerprint to user (e.g. via CLI output)
+- Must never rotate cert silently
 
-### Phase 0 — Skeleton app
+---
 
-- Scaffold Wails + Go app.
-- App launches, placeholder UI.
+## 9. Status
 
-### Phase 1 — Exit node registry
+- TLS model: **FINAL**
+- No further architectural decisions required in this area
+- Safe to proceed with:
+  - Registration API specification
+  - Server daemon implementation
+  - Client connection logic
 
-- Local persistence
-- CRUD UI
-- Local Machine built-in entry
+---
 
-### Phase 2 — Identity
+## 10. Next Recommended Artifact
 
-- WireGuard keypair generation
-- Secure storage (per decided method)
-- Public key display (optional; must be specified)
+**Client ↔ Server Registration Protocol Specification**, including:
 
-### Phase 3 — Connection orchestrator
+- Exact HTTPS endpoints
+- Request/response JSON schemas
+- Error codes
+- Peer lifecycle rules
+- Live WireGuard updates
 
-- Implement state machine
-- Start/stop flows, logging, error handling
-- Backend stub for platform calls
-
-### Phase 4 — macOS WireGuard integration
-
-- Implement actual bring-up/tear-down on macOS
-- Status checks
-
-### Phase 5 — Registration (if required for MVP)
-
-- Implement bootstrap call
-- Prevent anonymous registrations
-- Persist server parameters returned by registration
-
-### Phase 6 — Tor integration (only if specified)
-
-- Implement Tor routing and leak protection
-
-### Phase 7 — Hardening + packaging
-
-- Crash recovery and cleanup
-- Build reproducibility
-- `.app` packaging and (optional) signing/notarization
-
-## 13) Open questions (must be answered to finalize MVP scope)
-
-1. Does HuckVPN require Tor integration in MVP, or is it deferred?
-2. What is the registration/auth model for first-time connect (bootstrap token, SSH, something else)?
-3. Is TLS required for bootstrap endpoint? If yes, CA validation vs pinned cert?
-4. What storage is required for the client private key on macOS (Keychain vs file)?
-5. Must the `.app` be signed and notarized for distribution, or is developer/local distribution sufficient initially?
-6. Should "Local Machine" be functional in MVP (i.e., assume a local server exists), or only a placeholder entry?
+This document is now authoritative for TLS behavior in HuckVPN.
